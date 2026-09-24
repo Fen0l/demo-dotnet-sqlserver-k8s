@@ -1,6 +1,8 @@
 # Single container. entrypoint.sh (in the image) does the Kerberos work:
-#   krb5.conf from KRB5_KDC -> kinit -kt keytab -> renew every KRB5_RENEW_SECONDS -> app
-# Ticket cache and generated krb5.conf live in the /tmp emptyDir (rootfs is read-only).
+#   krb5.conf from KRB5_KDC -> kinit with the AD credentials -> renew every KRB5_RENEW_SECONDS -> app
+# The credentials Secret is MOUNTED as files (not envFrom): kubelet updates mounted Secret
+# files in place, so a rotated password (CyberArk -> Vault -> ESO) is used at the next
+# renewal with no pod restart. Ticket cache + krb5.conf live in the /tmp emptyDir.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,7 +40,7 @@ spec:
                 name: sqlprobe-config
             - secretRef:
                 name: sqlprobe-sqlauth
-                optional: true              # only present when SQLPROBE_AUTH=sql
+                optional: true                  # only present when SQLPROBE_AUTH=sql
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -62,17 +64,17 @@ spec:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }
           volumeMounts:
-            - name: keytab
-              mountPath: /krb5/keytab
+            - name: ad-credentials
+              mountPath: /krb5/creds            # files KRB5_USER, KRB5_PASSWORD (KRB5_CREDS_DIR)
               readOnly: true
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: keytab
+        - name: ad-credentials
           secret:
-            secretName: sqlprobe-keytab
+            secretName: sqlprobe-ad-credentials   # from CyberArk via Vault/ESO (25-externalsecret) or make-ad-secret.sh
             defaultMode: 0400
-            optional: true                  # sql mode has no keytab
+            optional: true                        # absent in sql mode
         - name: tmp
           emptyDir:
             medium: Memory

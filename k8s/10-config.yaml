@@ -17,9 +17,9 @@ data:
   # SQLPROBE_SPN: "MSSQLSvc/sql01.itcs.local:1433"
 
   # ── Kerberos (entrypoint.sh) ──────────────────────────────────────────────
-  KRB5_USER: "svc-sqlprobe@ITCS.LOCAL"
+  # KRB5_USER + KRB5_PASSWORD are files in Secret sqlprobe-ad-credentials, mounted at KRB5_CREDS_DIR
+  KRB5_CREDS_DIR: "/krb5/creds"
   KRB5_KDC: "10.12.54.14"                 # realm = part after '@' in KRB5_USER
-  KRB5_KEYTAB: "/krb5/keytab/svc-sqlprobe.keytab"
   KRB5CCNAME: "FILE:/tmp/krb5cc"
   KRB5_RENEW_SECONDS: "14400"             # re-kinit every 4 h (tickets last 10 h)
   # KRB5_TRACE: "/dev/stderr"             # verbose GSSAPI trace while troubleshooting

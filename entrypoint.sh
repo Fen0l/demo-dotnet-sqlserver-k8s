@@ -1,28 +1,42 @@
 #!/bin/bash
 # SqlProbe container entrypoint — owns everything Kerberos so that a plain
-# `docker run --env-file .env` works, and the Kubernetes kinit sidecar reuses it.
+# `docker run --env-file .env` works and the Kubernetes pod needs no sidecar.
 #
 #   entrypoint.sh              app mode: kinit if configured, keep renewing, exec dotnet
-#   entrypoint.sh kinit-loop   sidecar mode: kinit + renew forever, no app
+#   entrypoint.sh kinit-loop   kinit + renew forever, no app (optional sidecar use)
 #
-# Env (all optional unless SQLPROBE_AUTH=integrated and you want this container to kinit):
-#   KRB5_USER          principal, e.g. svc-sqlprobe@ITCS.LOCAL
-#   KRB5_KEYTAB        keytab path (used if the file exists)             -> kinit -kt
-#   KRB5_PASSWORD      password (used if no keytab); unset before the app starts
-#   KRB5_KDC           KDC host/IP. If set and no KRB5_CONFIG file is mounted, a
-#                      krb5.conf is generated in /tmp (realm = KRB5_REALM or the
-#                      part after '@' in KRB5_USER)
+# Credentials (SQLPROBE_AUTH=integrated):
+#   KRB5_CREDS_DIR     directory with files KRB5_USER and KRB5_PASSWORD — the Secret
+#                      sqlprobe-ad-credentials mounted as a volume. Files are re-read at
+#                      EVERY kinit, and Kubernetes updates mounted Secret files in place,
+#                      so a CyberArk/Vault/ESO password rotation is picked up at the next
+#                      renewal without restarting the pod. (default /krb5/creds)
+#   KRB5_USER / KRB5_PASSWORD   env alternative (docker run --env-file). The password is
+#                      removed from the app's environment after the first kinit.
+#   KRB5_KEYTAB        optional keytab path; used instead of a password if the file exists
+#
+# Other:
+#   KRB5_KDC           KDC host/IP. If set and no KRB5_CONFIG file is mounted, a krb5.conf
+#                      is generated in /tmp (realm = KRB5_REALM or the part after '@')
 #   KRB5_REALM         realm override
 #   KRB5_CONFIG        path of a mounted krb5.conf (takes precedence over KRB5_KDC)
-#   KRB5CCNAME         ticket cache (default FILE:/tmp/krb5cc; k8s uses the shared volume)
-#   KRB5_RENEW_SECONDS re-kinit interval (default 14400 = 4 h, tickets last 10 h)
+#   KRB5CCNAME         ticket cache (default FILE:/tmp/krb5cc)
+#   KRB5_RENEW_SECONDS re-kinit interval (default 14400 = 4 h; tickets last 10 h)
 #
-# If SQLPROBE_AUTH=sql, or no KRB5_USER, or neither keytab nor password is
-# available (k8s app container: the sidecar owns the ticket), Kerberos is skipped.
+# Renewal is atomic: kinit writes a new cache file, then it is renamed over the live
+# one, so the app (which reads the cache on every NEW SQL connection) never sees an
+# empty or half-written cache. Already-open pooled connections are not affected:
+# Kerberos is only used at login.
+#
+# If SQLPROBE_AUTH=sql, or no principal, or no credential source, Kerberos is skipped.
 set -uo pipefail
 MODE="${1:-app}"
 export KRB5CCNAME="${KRB5CCNAME:-FILE:/tmp/krb5cc}"
 KRB5_KEYTAB="${KRB5_KEYTAB:-/krb5/keytab/svc-sqlprobe.keytab}"
+KRB5_CREDS_DIR="${KRB5_CREDS_DIR:-/krb5/creds}"
+CC_FILE="${KRB5CCNAME#FILE:}"
+# principal: mounted file wins over env
+if [[ -s "$KRB5_CREDS_DIR/KRB5_USER" ]]; then KRB5_USER="$(tr -d '\r\n' < "$KRB5_CREDS_DIR/KRB5_USER")"; fi
 log() { echo "$(date -Is) entrypoint: $*"; }
 
 gen_krb5_conf() {
@@ -58,14 +72,26 @@ CONF
   log "generated $KRB5_CONFIG (realm $realm, kdc $KRB5_KDC)"
 }
 
+# Password source, evaluated at every call: mounted file (live-updated) > env.
+current_password() {
+  if [[ -s "$KRB5_CREDS_DIR/KRB5_PASSWORD" ]]; then tr -d '\r\n' < "$KRB5_CREDS_DIR/KRB5_PASSWORD"
+  elif [[ -n "${KRB5_PASSWORD:-}" ]]; then printf '%s' "$KRB5_PASSWORD"
+  else return 1; fi
+}
+have_credentials() { [[ -s "$KRB5_KEYTAB" ]] || current_password >/dev/null 2>&1; }
+
+# kinit into a fresh cache, then atomically replace the live one.
 do_kinit() {
+  local tmp="${CC_FILE}.new.$$" rc pw
   if [[ -s "$KRB5_KEYTAB" ]]; then
-    kinit -kt "$KRB5_KEYTAB" "$KRB5_USER"
-  elif [[ -n "${KRB5_PASSWORD:-}" ]]; then
-    printf '%s' "$KRB5_PASSWORD" | kinit "$KRB5_USER"
+    kinit -c "FILE:$tmp" -kt "$KRB5_KEYTAB" "$KRB5_USER"; rc=$?
+  elif pw="$(current_password)"; then
+    printf '%s' "$pw" | kinit -c "FILE:$tmp" "$KRB5_USER"; rc=$?
   else
     return 2
   fi
+  if [[ $rc -eq 0 ]]; then mv -f "$tmp" "$CC_FILE"; else rm -f "$tmp"; fi
+  return $rc
 }
 
 kinit_loop() {
@@ -79,8 +105,9 @@ kinit_loop() {
 want_kerberos=0
 if [[ "${SQLPROBE_AUTH:-integrated}" != "sql" && -n "${KRB5_USER:-}" ]]; then
   gen_krb5_conf
-  if [[ -s "$KRB5_KEYTAB" || -n "${KRB5_PASSWORD:-}" ]]; then want_kerberos=1
-  else log "KRB5_USER set but no keytab/password — assuming a sidecar provides $KRB5CCNAME"; fi
+  if have_credentials; then want_kerberos=1
+    [[ -s "$KRB5_CREDS_DIR/KRB5_PASSWORD" ]] && log "credentials from $KRB5_CREDS_DIR (re-read at every renewal)"
+  else log "KRB5_USER set but no credentials — assuming something else provides $KRB5CCNAME"; fi
 fi
 
 if [[ "$MODE" == "kinit-loop" ]]; then
@@ -91,7 +118,7 @@ fi
 if [[ $want_kerberos -eq 1 ]]; then
   if do_kinit; then log "kinit OK for $KRB5_USER"; klist
   else log "kinit FAILED for $KRB5_USER — the app will start anyway and report errors on /readyz"; fi
-  kinit_loop >/dev/null 2>&1 &     # background renewal (inherits KRB5_PASSWORD, main shell drops it)
+  kinit_loop >/dev/null 2>&1 &     # background renewal (inherits KRB5_PASSWORD env if used; main shell drops it)
 fi
 unset KRB5_PASSWORD
 exec dotnet /app/SqlProbe.dll

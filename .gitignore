@@ -1,7 +1,6 @@
 bin/
 obj/
-*.keytab
-*.ccache
 .env
-k8s/20-keytab-secret.yaml
+k8s/20-ad-credentials-secret.yaml
+k8s/25-externalsecret.yaml
 k8s/21-sqlauth-secret.yaml
