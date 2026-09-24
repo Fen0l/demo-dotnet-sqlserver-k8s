@@ -4,6 +4,7 @@
 // Configuration (env vars, ASP.NET Core "__" convention):
 //   ConnectionStrings__Default   full SqlClient connection string (required)
 //   SQLPROBE_TABLE               table used by /db/notes (default: dbo.ProbeNotes)
+//   SQLPROBE_DEBUG               true = trace SqlClient internals to the log (with Logging__LogLevel__Default=Debug)
 //
 // Auth mode is decided by the connection string alone:
 //   Integrated Security=true            -> Kerberos via GSSAPI (needs TGT in KRB5CCNAME)
@@ -31,8 +32,36 @@ string connStr = builder.Configuration.GetConnectionString("Default")
 string table = builder.Configuration["SQLPROBE_TABLE"] ?? "dbo.ProbeNotes";
 
 var safe = new SqlConnectionStringBuilder(connStr);
-log.LogInformation("SqlProbe starting. Server={Server} Database={Db} IntegratedSecurity={Int} Encrypt={Enc}",
-    safe.DataSource, safe.InitialCatalog, safe.IntegratedSecurity, safe.Encrypt);
+log.LogInformation("SqlProbe starting. Server={Server} Database={Db} IntegratedSecurity={Int} Encrypt={Enc} ConnectTimeout={To}s",
+    safe.DataSource, safe.InitialCatalog, safe.IntegratedSecurity, safe.Encrypt, safe.ConnectTimeout);
+
+// SQLPROBE_DEBUG=true: forward Microsoft.Data.SqlClient's internal EventSource
+// (connection open, pre-login/TLS, login, SSPI/Kerberos) to the console log.
+// This is what shows WHERE a connection stalls.
+SqlClientTraceListener? trace = null;
+if (string.Equals(builder.Configuration["SQLPROBE_DEBUG"], "true", StringComparison.OrdinalIgnoreCase))
+{
+    trace = new SqlClientTraceListener(log);
+    log.LogWarning("SQLPROBE_DEBUG=true — SqlClient EventSource tracing enabled (verbose)");
+}
+
+// Try one connection at startup, in the background, so `docker logs` shows the
+// outcome and the elapsed time even before anyone calls an endpoint.
+_ = Task.Run(async () =>
+{
+    var sw = Stopwatch.StartNew();
+    try
+    {
+        await using var cn = new SqlConnection(connStr);
+        await cn.OpenAsync();
+        log.LogInformation("Startup probe: connected to {Server} in {Ms} ms (SQL Server {Ver})", safe.DataSource, sw.ElapsedMilliseconds, cn.ServerVersion);
+    }
+    catch (Exception ex)
+    {
+        log.LogError("Startup probe: FAILED after {Ms} ms — {Type}: {Msg}", sw.ElapsedMilliseconds, ex.GetType().Name, ex.Message);
+        if (ex.InnerException is not null) log.LogError("  inner: {Type}: {Msg}", ex.InnerException.GetType().Name, ex.InnerException.Message);
+    }
+});
 
 app.MapGet("/", () => Results.Ok(new
 {
@@ -229,3 +258,25 @@ static string BuildConnectionString(IConfiguration cfg)
 }
 
 record NoteRequest(string? Text);
+
+// Bridges Microsoft.Data.SqlClient.EventSource -> ILogger. Keywords: 1=ExecutionTrace,
+// 2=Trace, 4=Scope, 8=NotificationTrace, ..., 0x40=AdvancedTrace, 0x100=Correlation,
+// 0x200=StateDump, 0x400=SNITrace (network/TDS layer), 0x800=SNIScope.
+sealed class SqlClientTraceListener : System.Diagnostics.Tracing.EventListener
+{
+    private readonly ILogger _log;
+    public SqlClientTraceListener(ILogger log) => _log = log;
+
+    protected override void OnEventSourceCreated(System.Diagnostics.Tracing.EventSource source)
+    {
+        if (source.Name == "Microsoft.Data.SqlClient.EventSource")
+            EnableEvents(source, System.Diagnostics.Tracing.EventLevel.Verbose,
+                (System.Diagnostics.Tracing.EventKeywords)(1 | 2 | 0x40 | 0x400));
+    }
+
+    protected override void OnEventWritten(System.Diagnostics.Tracing.EventWrittenEventArgs e)
+    {
+        if (e.Payload is { Count: > 0 })
+            _log.LogDebug("[SqlClient:{Event}] {Payload}", e.EventName, string.Join(" | ", e.Payload));
+    }
+}
