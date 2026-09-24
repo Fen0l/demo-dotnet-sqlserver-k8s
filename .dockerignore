@@ -7,3 +7,4 @@ local/
 *.md
 *.keytab
 .git/
+krb5.conf

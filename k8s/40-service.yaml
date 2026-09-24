@@ -1,0 +1,18 @@
+# LoadBalancer via MetalLB (NKP default). Switch to ClusterIP + Traefik Ingress
+# if the workload cluster has no free pool IPs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqlprobe
+  namespace: sqlprobe
+  labels:
+    app.kubernetes.io/name: sqlprobe
+    app.kubernetes.io/part-of: dotnet-sqlserver-poc
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: sqlprobe
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,79 @@
+# Single container. entrypoint.sh (in the image) does the Kerberos work:
+#   krb5.conf from KRB5_KDC -> kinit -kt keytab -> renew every KRB5_RENEW_SECONDS -> app
+# Ticket cache and generated krb5.conf live in the /tmp emptyDir (rootfs is read-only).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlprobe
+  namespace: sqlprobe
+  labels:
+    app.kubernetes.io/name: sqlprobe
+    app.kubernetes.io/part-of: dotnet-sqlserver-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sqlprobe
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sqlprobe
+        app.kubernetes.io/part-of: dotnet-sqlserver-poc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: nexus.corp.local:8443/nkp/sqlprobe:0.1.0   # <-- your Nexus hosted repo + tag
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: sqlprobe-config
+            - secretRef:
+                name: sqlprobe-sqlauth
+                optional: true              # only present when SQLPROBE_AUTH=sql
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # startupProbe: gives kinit + first SQL connect up to 2 min before liveness kicks in
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          # readiness = a real SQL login succeeded (Kerberos ticket + SPN + login all OK)
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - name: keytab
+              mountPath: /krb5/keytab
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: keytab
+          secret:
+            secretName: sqlprobe-keytab
+            defaultMode: 0400
+            optional: true                  # sql mode has no keytab
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

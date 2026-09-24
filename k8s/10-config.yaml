@@ -1,0 +1,26 @@
+# All runtime settings of the app + its Kerberos entrypoint. Edit and re-apply,
+# then `kubectl -n sqlprobe rollout restart deploy/sqlprobe`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqlprobe-config
+  namespace: sqlprobe
+data:
+  # ── SQL Server ────────────────────────────────────────────────────────────
+  # FQDN,port — must be the FQDN of the SPN (MSSQLSvc/<fqdn>:<port>). Never an IP.
+  SQLPROBE_SERVER: "sql01.itcs.local,1433"
+  SQLPROBE_DATABASE: "SqlProbe"
+  # integrated = Active Directory user via Kerberos | sql = local SQL login (needs 21-sqlauth-secret.yaml)
+  SQLPROBE_AUTH: "integrated"
+  SQLPROBE_TRUST_SERVER_CERT: "true"
+  # Uncomment only if the SPN differs from host:port
+  # SQLPROBE_SPN: "MSSQLSvc/sql01.itcs.local:1433"
+
+  # ── Kerberos (entrypoint.sh) ──────────────────────────────────────────────
+  KRB5_USER: "svc-sqlprobe@ITCS.LOCAL"
+  KRB5_KDC: "10.12.54.14"                 # realm = part after '@' in KRB5_USER
+  KRB5_KEYTAB: "/krb5/keytab/svc-sqlprobe.keytab"
+  KRB5CCNAME: "FILE:/tmp/krb5cc"
+  KRB5_RENEW_SECONDS: "14400"             # re-kinit every 4 h (tickets last 10 h)
+  # KRB5_TRACE: "/dev/stderr"             # verbose GSSAPI trace while troubleshooting
+  # SQLPROBE_DEBUG: "true"                # + Logging__LogLevel__Default: "Debug" for SqlClient tracing

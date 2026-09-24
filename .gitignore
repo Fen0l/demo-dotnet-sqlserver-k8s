@@ -2,6 +2,6 @@ bin/
 obj/
 *.keytab
 *.ccache
-k8s/overlays/kerberos/keytab-secret.yaml
-k8s/overlays/sqlauth/sqlauth-secret.yaml
 .env
+k8s/20-keytab-secret.yaml
+k8s/21-sqlauth-secret.yaml
