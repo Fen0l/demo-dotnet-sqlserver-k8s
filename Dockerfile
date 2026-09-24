@@ -6,6 +6,7 @@
 #   --build-arg BASE_REGISTRY=nexus.corp.local:8443/mcr              # docker proxy of mcr.microsoft.com
 #   --build-arg DEBIAN_IMAGE=nexus.corp.local:8443/dockerhub/debian:trixie-slim   # docker proxy of docker.io
 #   --build-arg NUGET_SOURCE=https://nexus.corp.local/repository/nuget-group/index.json
+#   --build-arg NUGET_USERNAME=svc-build  --secret id=nuget_password,env=NUGET_PASSWORD
 #   --build-arg APT_MIRROR=https://nexus.corp.local/repository/debian-trixie/
 #   --build-arg APT_SECURITY_MIRROR=https://nexus.corp.local/repository/debian-trixie-security/
 ARG BASE_REGISTRY=mcr.microsoft.com
@@ -14,10 +15,25 @@ ARG DEBIAN_IMAGE=debian:trixie-slim
 # ── build ────────────────────────────────────────────────────────────────────
 FROM ${BASE_REGISTRY}/dotnet/sdk:10.0 AS build
 ARG NUGET_SOURCE=https://api.nuget.org/v3/index.json
+# Authenticated Nexus NuGet feed: username is a plain build arg, the password is a
+# BuildKit secret (docker build --secret id=nuget_password,env=NUGET_PASSWORD).
+# A throw-away nuget.config is written and removed inside ONE RUN step, so the
+# credential never lands in a layer, in `docker history`, or in the final image.
+ARG NUGET_USERNAME=
 WORKDIR /src
 COPY src/SqlProbe/SqlProbe.csproj SqlProbe/
-# --source overrides every configured feed, so a Nexus NuGet group/proxy is enough.
-RUN dotnet restore SqlProbe/SqlProbe.csproj --source "$NUGET_SOURCE"
+RUN --mount=type=secret,id=nuget_password,required=false \
+    set -eu; \
+    printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<configuration>' '  <packageSources>' \
+      '    <clear />' "    <add key=\"feed\" value=\"$NUGET_SOURCE\" />" '  </packageSources>' \
+      '</configuration>' > /src/nuget.config; \
+    if [ -n "$NUGET_USERNAME" ] && [ -s /run/secrets/nuget_password ]; then \
+      dotnet nuget update source feed --configfile /src/nuget.config \
+        --username "$NUGET_USERNAME" --password "$(cat /run/secrets/nuget_password)" \
+        --store-password-in-clear-text >/dev/null; \
+    fi; \
+    dotnet restore SqlProbe/SqlProbe.csproj --configfile /src/nuget.config; \
+    rm -f /src/nuget.config
 COPY src/SqlProbe/ SqlProbe/
 RUN dotnet publish SqlProbe/SqlProbe.csproj -c Release -o /app/publish --no-restore
 
@@ -48,8 +64,9 @@ RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 USER 1654
 WORKDIR /app
 COPY --from=build --chown=1654:1654 /app/publish .
+COPY --chown=1654:1654 entrypoint.sh /app/entrypoint.sh
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
     DOTNET_EnableDiagnostics=0 \
     DOTNET_RUNNING_IN_CONTAINER=true
 EXPOSE 8080
-ENTRYPOINT ["dotnet", "SqlProbe.dll"]
+ENTRYPOINT ["/app/entrypoint.sh"]
