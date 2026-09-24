@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SqlProbe</AssemblyName>
+    <RootNamespace>SqlProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft.Data.SqlClient on Linux: Integrated Security=true uses MIT Kerberos
+         through GSSAPI (libgssapi-krb5-2). NTLM is NOT available on Linux, so a
+         valid TGT in KRB5CCNAME and a registered MSSQLSvc SPN are mandatory. -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.0" />
+  </ItemGroup>
+
+</Project>

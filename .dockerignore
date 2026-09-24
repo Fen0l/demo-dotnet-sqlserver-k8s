@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+k8s/
+ad/
+scripts/
+local/
+*.md
+*.keytab
+.git/
